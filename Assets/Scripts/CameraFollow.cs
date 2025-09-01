@@ -91,7 +91,6 @@ public class CameraFollow : MonoBehaviour
     {
         if (GameManager.Instance != null)
         {
-            GameManager.Instance.OnPlayerSpawned -= OnPlayerSpawned; // 防止重复订阅
             GameManager.Instance.OnPlayerSpawned += OnPlayerSpawned;
             Debug.Log("CameraFollow 成功订阅 GameManager.OnPlayerSpawned 事件");
         }

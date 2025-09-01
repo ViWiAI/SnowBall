@@ -1,6 +1,7 @@
 ﻿using Best.HTTP.Shared.PlatformSupport.Memory;
 using Best.WebSockets;
 using Best.WebSockets.Implementations;
+using Newtonsoft.Json;
 using PimDeWitte.UnityMainThreadDispatcher;
 using System;
 using System.Collections;
@@ -35,6 +36,10 @@ namespace Game.Network
             CharacterCreate = 5,
             ItemCollected = 6,
             ItemSpawned = 7,
+            PlayerList = 8,
+            Ping = 9,
+            Pong = 10,
+            PlayerOffline = 11,
             Error = 255
         }
 
@@ -95,7 +100,7 @@ namespace Game.Network
             }
 
             Debug.Log("正在连接WebSocket服务器...");
-            ws = new WebSocket(new Uri("ws://localhost:7272"));
+            ws = new WebSocket(new Uri("ws://124.156.203.23:7272"));
 
             ws.OnOpen += OnWebSocketOpen;
             ws.OnBinary += OnWebSocketBinary;
@@ -164,17 +169,17 @@ namespace Game.Network
 
                     if (payloadLength > data.Length - 5)
                     {
-                        Debug.LogWarning($"Payload长度不匹配: 期望{payloadLength}, 实际{data.Length - 5}");
+                        //Debug.LogWarning($"Payload长度不匹配: 期望{payloadLength}, 实际{data.Length - 5}");
                         return;
                     }
-
+                    //Debug.Log($"OnWebSocketBinary： msgType={msgType}, data={BitConverter.ToString(buffer.Data, buffer.Offset, buffer.Count)}");
                     byte[] payload = new byte[payloadLength];
                     Array.Copy(data, 5, payload, 0, payloadLength);
                     OnMessageReceived?.Invoke(msgType, payload);
                 }
                 catch (Exception e)
                 {
-                    Debug.LogError($"二进制消息解析失败: {e.Message}");
+                    Debug.Log($"二进制消息解析失败: {e.Message}");
                 }
             });
         }
@@ -202,7 +207,7 @@ namespace Game.Network
         {
             lock (queueLock)
             {
-                Debug.Log($"WebSocketManager.Send: msgType={msgType}, data={BitConverter.ToString(message.Data, message.Offset, message.Count)}");
+                //Debug.Log($"WebSocketManager.Send: msgType={msgType}, data={BitConverter.ToString(message.Data, message.Offset, message.Count)}");
                 if (IsConnected)
                 {
                     SendInternal(msgType, message);
@@ -242,7 +247,7 @@ namespace Game.Network
                     Array.Copy(message.Data, message.Offset, buffer, 5, message.Count);
 
                     BufferSegment newSegment = new BufferSegment(buffer, 0, totalLength);
-                    Debug.Log($"SendInternal: Constructed new message, msgType={msgType}, data={BitConverter.ToString(buffer, 0, totalLength)}");
+                    //Debug.Log($"SendInternal: Constructed new message, msgType={msgType}, data={BitConverter.ToString(buffer, 0, totalLength)}");
                     ws.SendAsBinary(newSegment);
                 }
             }

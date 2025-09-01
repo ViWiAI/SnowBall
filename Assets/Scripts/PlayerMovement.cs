@@ -6,34 +6,48 @@ using UnityEngine;
 public class PlayerMovement : MonoBehaviour
 {
     [Header("运动设置")]
-    public float moveSpeed = 3f; // 移动速度（米/秒）
-    public float ballRadius = 0.5f; // 雪球半径（米）
-    public float drag = 50f; // 模拟阻力
-    public float brakeSpeed = 0.01f; // 刹车时每帧减少的速度
-    public float inputSmoothing = 10f; // 输入平滑系数
-    [SerializeField] private Vector2 mapSize = new Vector2(1000f, 1000f); // 地图尺寸
+    public float moveSpeed = 10f;
+    public float ballRadius = 0.5f;
+    public float drag = 50f;
+    public float brakeSpeed = 0.01f;
+    public float inputSmoothing = 10f;
+    [SerializeField] private Vector2 mapSize = new Vector2(1000f, 1000f);
+    private int scaleFactor = 1000;
 
-    private Vector3 rawMoveDirection; // 原始输入方向
-    private Vector3 smoothedMoveDirection; // 平滑输入方向
+    private Vector3 rawMoveDirection;
+    private Vector3 smoothedMoveDirection;
     private Vector3 currentVelocity;
     private float currentSpeed;
     private Vector3 lastMoveDirection;
-    private ItemSpawner itemSpawner; // 引用 ItemSpawner
-    private bool isLocalPlayer; // 是否为本地玩家
-    private int playerId; // 玩家唯一ID
-    private int stage; // 地图ID
+    private ItemSpawner itemSpawner;
+    private bool isLocalPlayer;
+    private int playerId;
+    private int stage;
     private float lastSendTime;
     private const float SEND_INTERVAL = 0.1f;
+    private MeshRenderer meshRenderer;
+    private Transform localPlayerTransform;
+    private float renderDistance = 50f; // 渲染距离
+
+    // 新增：用于插值的目标状态（远程玩家）
+    private Vector3 targetPosition;
+    private Vector3 targetVelocity;
+    private Quaternion targetRotation;
+    private int targetScaleFactor;
+    private float lerpSpeed = 10f; // 插值速度
+
+    // 新增：最后发送的输入时间戳（用于reconciliation）
+    private float lastInputTime;
 
     public float CurrentSpeed => currentSpeed;
     public int PlayerId => playerId;
     public bool IsLocalPlayer => isLocalPlayer;
+    public int ScaleFactor => scaleFactor;
 
     public static event Action<string, GameObject> OnItemCollected;
 
     void Start()
     {
-        // 初始化 Rigidbody
         Rigidbody rb = GetComponent<Rigidbody>();
         if (rb != null)
         {
@@ -41,15 +55,13 @@ public class PlayerMovement : MonoBehaviour
             rb.constraints = RigidbodyConstraints.FreezePositionY | RigidbodyConstraints.FreezeRotationY;
         }
 
-        // 初始化 MeshRenderer
-        MeshRenderer renderer = GetComponent<MeshRenderer>();
-        if (renderer != null)
+        meshRenderer = GetComponent<MeshRenderer>();
+        if (meshRenderer != null)
         {
-            renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-            renderer.receiveShadows = false;
+            meshRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            meshRenderer.receiveShadows = false;
         }
 
-        // 查找 ItemSpawner
         itemSpawner = FindObjectOfType<ItemSpawner>();
         if (itemSpawner == null)
         {
@@ -57,30 +69,51 @@ public class PlayerMovement : MonoBehaviour
         }
 
         Application.targetFrameRate = 60;
+        UpdateScale();
+
+        // 获取本地玩家
+        localPlayerTransform = GameManager.Instance.GetPlayerObject(GameManager.Instance.PlayerId())?.transform;
+
+        targetPosition = transform.position;
+        targetVelocity = currentVelocity;
+        targetRotation = transform.rotation;
+        targetScaleFactor = scaleFactor;
     }
 
-    public void Initialize(int playerId, bool isLocal, int stage)
+    void FixedUpdate()  // 改为FixedUpdate，确保确定性
     {
-        this.playerId = playerId;
-        this.isLocalPlayer = isLocal;
-        this.stage = stage;
-    }
+        // 动态控制渲染
+        if (!isLocalPlayer && meshRenderer != null && localPlayerTransform != null)
+        {
+            float distance = Vector3.Distance(transform.position, localPlayerTransform.position);
+            meshRenderer.enabled = distance < renderDistance;
+        }
 
-    void Update()
-    {
-        if (!isLocalPlayer) return; // 远程玩家由服务器控制
+        if (!isLocalPlayer)
+        {
+            // 远程玩家：插值平滑
+            transform.position = Vector3.Lerp(transform.position, targetPosition, Time.fixedDeltaTime * lerpSpeed);
+            currentVelocity = Vector3.Lerp(currentVelocity, targetVelocity, Time.fixedDeltaTime * lerpSpeed);
+            transform.rotation = Quaternion.Slerp(transform.rotation, targetRotation, Time.fixedDeltaTime * lerpSpeed);
+            scaleFactor = (int)Mathf.Lerp(scaleFactor, targetScaleFactor, Time.fixedDeltaTime * lerpSpeed);
+            UpdateScale();
+            currentSpeed = currentVelocity.magnitude;
+            return;
+        }
+
+        // 本地玩家：处理输入和预测
+        HandleKeyboardInput();  // 移出Update，放在这里
 
         if (Input.GetKey(KeyCode.Space))
         {
             StopMovement();
+#if UNITY_EDITOR
             Debug.Log($"刹车中：当前速度 = {currentVelocity.magnitude:F2}");
-            SendStopRequest();
+#endif
+            SendInputRequest(Vector3.zero);  // 发送刹车输入
         }
         else
         {
-            // 处理键盘输入
-            HandleKeyboardInput();
-
             float xThreshold = 0.1f;
             Vector3 moveDirection;
             if (Mathf.Abs(smoothedMoveDirection.z) > Mathf.Abs(smoothedMoveDirection.x) + xThreshold)
@@ -98,34 +131,30 @@ public class PlayerMovement : MonoBehaviour
 
             if (moveDirection != Vector3.zero)
             {
-                currentVelocity = Vector3.Lerp(currentVelocity, moveDirection * moveSpeed, Time.deltaTime * 0.5f);
+                currentVelocity = Vector3.Lerp(currentVelocity, moveDirection * moveSpeed, Time.fixedDeltaTime * 0.5f);
                 lastMoveDirection = moveDirection;
             }
             else
             {
-                currentVelocity = Vector3.Lerp(currentVelocity, Vector3.zero, Time.deltaTime * drag);
-                lastMoveDirection = currentVelocity.normalized;
+                StopMovement();
             }
 
-            // 发送移动请求（仅在有输入且在移动时）
-            if (smoothedMoveDirection != Vector3.zero && currentSpeed > 0.01f)
+            if (currentSpeed > 0.01f)
             {
-                SendMoveRequest(moveDirection);
+                SendInputRequest(lastMoveDirection);  // 发送输入而非位置
             }
         }
 
         currentSpeed = currentVelocity.magnitude;
 
-        // 本地玩家移动
         if (currentSpeed > 0.01f)
         {
-            Vector3 displacement = currentVelocity * Time.deltaTime;
+            Vector3 displacement = currentVelocity * Time.fixedDeltaTime;
             Vector3 newPosition = transform.position + displacement;
 
-            // 限制玩家位置
             newPosition.x = Mathf.Clamp(newPosition.x, 1f, mapSize.x);
             newPosition.z = Mathf.Clamp(newPosition.z, 1f, mapSize.y);
-            newPosition.y = 0.5f; // 确保 Y = 0.5
+            newPosition.y = 0.5f;
 
             transform.position = newPosition;
 
@@ -153,33 +182,20 @@ public class PlayerMovement : MonoBehaviour
             rawMoveDirection.Normalize();
         }
 
-        smoothedMoveDirection = Vector3.Lerp(smoothedMoveDirection, rawMoveDirection, Time.deltaTime * inputSmoothing);
+        smoothedMoveDirection = Vector3.Lerp(smoothedMoveDirection, rawMoveDirection, Time.fixedDeltaTime * inputSmoothing);
     }
 
-    private void SendMoveRequest(Vector3 moveDirection)
+    private void SendInputRequest(Vector3 inputDirection)
     {
         if (Time.time - lastSendTime < SEND_INTERVAL) return;
         lastSendTime = Time.time;
-        Vector3Int position = new Vector3Int(
-            Mathf.RoundToInt(transform.position.x * 1000),
-            Mathf.RoundToInt(transform.position.y * 1000),
-            Mathf.RoundToInt(transform.position.z * 1000)
-        );
-        NetworkMessageHandler.Instance.SendMoveRequest(playerId, stage, position);
-        //Debug.Log($"发送移动请求: 玩家ID={playerId}, 位置={position}, 方向={moveDirection}");
-    }
+        lastInputTime = Time.time;  // 记录时间戳，用于reconciliation
 
-    private void SendStopRequest()
-    {
-        if (Time.time - lastSendTime < SEND_INTERVAL) return;
-        lastSendTime = Time.time;
-        Vector3Int position = new Vector3Int(
-            Mathf.RoundToInt(transform.position.x * 1000),
-            Mathf.RoundToInt(transform.position.y * 1000),
-            Mathf.RoundToInt(transform.position.z * 1000)
-        );
-        NetworkMessageHandler.Instance.SendMoveRequest(playerId, stage, position);
-        //Debug.Log($"发送刹车请求: 玩家ID={playerId}, 位置={position}");
+        // 发送输入方向、时间戳等（需修改NetworkMessageHandler）
+        NetworkMessageHandler.Instance.SendInputRequest(playerId, stage, inputDirection, lastInputTime, scaleFactor);
+#if UNITY_EDITOR
+        Debug.Log($"发送输入请求: 玩家ID={playerId}, 输入={inputDirection}, 时间={lastInputTime}, 缩放倍数={scaleFactor}");
+#endif
     }
 
     private void SendItemCollected(string itemType, int spawnId)
@@ -187,7 +203,6 @@ public class PlayerMovement : MonoBehaviour
         BufferSegment itemTypeSegment = BinaryProtocol.EncodeString(itemType);
         BufferSegment spawnIdSegment = BinaryProtocol.EncodeInt32(spawnId);
 
-        // 计算有效载荷长度
         int totalLength = itemTypeSegment.Count + spawnIdSegment.Count;
         byte[] buffer = BufferPool.Get(totalLength, true);
         int offset = 0;
@@ -195,21 +210,69 @@ public class PlayerMovement : MonoBehaviour
         offset += itemTypeSegment.Count;
         Array.Copy(spawnIdSegment.Data, spawnIdSegment.Offset, buffer, offset, spawnIdSegment.Count);
 
-        // 创建不含消息头的 BufferSegment
         BufferSegment payload = new BufferSegment(buffer, 0, totalLength);
         WebSocketManager.Instance.Send(WebSocketManager.MessageType.ItemCollected, payload);
 
         BufferPool.Release(itemTypeSegment.Data);
         BufferPool.Release(spawnIdSegment.Data);
+#if UNITY_EDITOR
         Debug.Log($"发送道具收集消息: itemType={itemType}, spawnId={spawnId}, payload={BitConverter.ToString(payload.Data, payload.Offset, payload.Count)}");
+#endif
     }
 
-    public void UpdatePosition(Vector3 position, Vector3 velocity, Quaternion rotation)
+    public void Initialize(int playerId, bool isLocal, int stage)
     {
-        transform.position = position;
-        currentVelocity = velocity;
-        transform.rotation = rotation;
-        currentSpeed = velocity.magnitude;
+        this.playerId = playerId;
+        this.isLocalPlayer = isLocal;
+        this.stage = stage;
+    }
+
+    private void UpdateScale()
+    {
+        float scale = scaleFactor / 1000f;
+        transform.localScale = new Vector3(scale, scale, scale);
+#if UNITY_EDITOR
+        //Debug.Log($"更新玩家缩放: playerId={playerId}, scaleFactor={scaleFactor}, scale={scale}");
+#endif
+    }
+
+    // 假设服务器广播权威状态时调用此方法
+    public void UpdatePosition(Vector3 position, Vector3 velocity, Quaternion rotation, int newScaleFactor, float serverTime)
+    {
+        if (isLocalPlayer)
+        {
+            // 本地：reconciliation - 如果服务器时间 > 最后输入，修正并重放本地输入
+            if (serverTime > lastInputTime)
+            {
+                transform.position = position;
+                currentVelocity = velocity;
+                transform.rotation = rotation;
+                scaleFactor = newScaleFactor;
+                UpdateScale();
+                // 重放本地输入（简化版：从serverTime到现在，重模拟）
+                float delta = Time.time - serverTime;
+                Vector3 displacement = currentVelocity * delta;
+                transform.position += displacement;
+                // ... 添加旋转重放如果需要
+                float distance = displacement.magnitude;
+                if (ballRadius > 0)
+                {
+                    float rotationAngle = (distance / (2 * Mathf.PI * ballRadius)) * 360f;
+                    Vector3 rotationAxis = Vector3.Cross(Vector3.up, lastMoveDirection).normalized;
+                    transform.Rotate(rotationAxis, rotationAngle, Space.World);
+                }
+            }
+        }
+        else
+        {
+            // 远程：设置目标用于插值
+            targetPosition = position;
+            targetVelocity = velocity;
+            targetRotation = rotation;
+            targetScaleFactor = newScaleFactor;
+        }
+
+        currentSpeed = currentVelocity.magnitude;
     }
 
     public float GetCurrentSpeed() => currentSpeed;
@@ -218,7 +281,7 @@ public class PlayerMovement : MonoBehaviour
 
     public void StopMovement()
     {
-        float speedReduction = brakeSpeed * Time.deltaTime * 60f;
+        float speedReduction = brakeSpeed * Time.fixedDeltaTime * 60f;
         currentVelocity = Vector3.MoveTowards(currentVelocity, Vector3.zero, speedReduction);
         smoothedMoveDirection = Vector3.zero;
         currentSpeed = currentVelocity.magnitude;
@@ -238,7 +301,9 @@ public class PlayerMovement : MonoBehaviour
     public void SetMapSize(Vector2 newMapSize)
     {
         mapSize = newMapSize;
+#if UNITY_EDITOR
         Debug.Log($"玩家地图大小更新: {mapSize}");
+#endif
     }
 
     void OnCollisionEnter(Collision collision)
@@ -247,10 +312,12 @@ public class PlayerMovement : MonoBehaviour
         {
             currentVelocity = Vector3.zero;
             currentSpeed = 0f;
+#if UNITY_EDITOR
             Debug.Log("撞墙：停止移动");
+#endif
             if (isLocalPlayer)
             {
-                SendStopRequest();
+                SendInputRequest(Vector3.zero);
             }
         }
     }
@@ -288,7 +355,9 @@ public class PlayerMovement : MonoBehaviour
     private void CollectItem(GameObject item, string itemType)
     {
         OnItemCollected?.Invoke(itemType, item);
+#if UNITY_EDITOR
         Debug.Log($"收集到道具：{itemType}");
+#endif
         if (ItemSpawner.Instance != null)
         {
             int spawnId = ItemSpawner.Instance.GetSpawnId(item);
